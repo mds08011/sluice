@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sluice — batch audio transcription</title>
+<meta name="description" content="Serverless batch audio transcription. Bring your own Groq API key, dump your recordings, let it chug.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230E141B'/%3E%3Cpath d='M4 20c3-3 5 3 8 0s5 3 8 0 5 3 8 0' stroke='%234FC3D9' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M9 6v8M23 6v8' stroke='%237C8B99' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --ink:#0E141B;          /* deep slate — tank at night */
+  --panel:#151D26;
+  --panel-2:#1B2530;
+  --line:#2A3644;
+  --text:#D9E2EA;
+  --dim:#8496A5;
+  --flow:#4FC3D9;         /* channel water */
+  --flow-deep:#2A93AB;
+  --amber:#E8A33D;        /* running / caution */
+  --ok:#5DBB7A;
+  --err:#D96C5C;
+  --radius:10px;
+  --display:'Chakra Petch', 'Segoe UI', system-ui, sans-serif;
+  --body:system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono:ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--ink);
+  color:var(--text);
+  font-family:var(--body);
+  font-size:15px;
+  line-height:1.5;
+  min-height:100vh;
+}
+::selection{background:rgba(79,195,217,.28)}
+button{font-family:inherit;color:inherit;cursor:pointer}
+input,select,textarea{font-family:inherit;font-size:14px;color:var(--text);background:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--flow-deep);outline-offset:1px;border-color:transparent}
+button:focus-visible,[contenteditable]:focus-visible{outline:2px solid var(--flow-deep);outline-offset:2px}
+a{color:var(--flow)}
+
+/* ---------- shell ---------- */
+.wrap{max-width:880px;margin:0 auto;padding:0 16px 80px}
+header.app{display:flex;align-items:center;gap:14px;padding:18px 0 10px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;margin-right:auto}
+.brand svg{flex:none}
+.brand h1{font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:.14em;text-transform:uppercase;margin:0}
+.brand small{display:block;font-family:var(--body);font-weight:400;font-size:11.5px;letter-spacing:.02em;color:var(--dim);text-transform:none;margin-top:-2px}
+.usage{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap}
+.usage b{color:var(--text);font-weight:600}
+.iconbtn{display:inline-flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;color:var(--text)}
+.iconbtn:hover{border-color:var(--flow-deep)}
+.iconbtn svg{width:16px;height:16px}
+.iconbtn.warn{color:var(--amber)}
+
+/* ---------- drop zone ---------- */
+#drop{
+  margin-top:10px;border:1.5px dashed var(--line);border-radius:var(--radius);
+  background:var(--panel);padding:34px 20px;text-align:center;cursor:pointer;
+  transition:border-color .15s, background .15s;
+}
+#drop:hover,#drop.over{border-color:var(--flow);background:var(--panel-2)}
+#drop .big{font-family:var(--display);font-weight:600;font-size:16px;letter-spacing:.05em}
+#drop .sub{color:var(--dim);font-size:13px;margin-top:4px}
+#drop svg{width:30px;height:30px;color:var(--flow);margin-bottom:8px}
+
+/* ---------- queue ---------- */
+#queueHead{display:flex;align-items:baseline;gap:10px;margin:26px 0 8px}
+#queueHead h2{font-family:var(--display);font-size:13px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin:0}
+#queueHead .count{font-family:var(--mono);font-size:12px;color:var(--dim)}
+.job{
+  display:grid;grid-template-columns:5px 1fr auto;gap:0 14px;align-items:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  margin-bottom:10px;overflow:hidden;
+}
+.job .rail{align-self:stretch;background:var(--line)}
+.job.queued .rail{background:var(--line)}
+.job.processing .rail{background:var(--amber)}
+.job.done .rail{background:var(--ok)}
+.job.error .rail{background:var(--err)}
+.job .mid{padding:12px 0 12px 8px;min-width:0}
+.job .name{font-weight:600;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job.done .name{cursor:pointer}
+.job.done .name:hover{color:var(--flow)}
+.job .meta{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:2px}
+.job .status{font-size:12.5px;margin-top:6px;color:var(--dim)}
+.job.processing .status{color:var(--amber)}
+.job.error .status{color:var(--err)}
+.job.done .status{color:var(--ok)}
+.job .acts{display:flex;gap:6px;padding:12px 12px 12px 0}
+.job .acts button{background:none;border:1px solid var(--line);border-radius:7px;padding:6px 9px;font-size:12px;color:var(--dim);display:inline-flex;align-items:center;gap:5px}
+.job .acts button:hover{color:var(--text);border-color:var(--flow-deep)}
+.job .acts button.primary{color:var(--ink);background:var(--flow);border-color:var(--flow);font-weight:700}
+.job .acts button.primary:hover{background:#6ad1e4;color:var(--ink)}
+.job .acts svg{width:14px;height:14px}
+.bar{height:4px;border-radius:2px;background:var(--ink);margin:8px 12px 0 0;overflow:hidden;display:none}
+.job.processing .bar{display:block}
+.bar i{display:block;height:100%;width:0%;border-radius:2px;
+  background:repeating-linear-gradient(100deg,var(--flow) 0 14px,var(--flow-deep) 14px 28px);
+  background-size:200% 100%;animation:flow 1.6s linear infinite;transition:width .4s}
+@keyframes flow{to{background-position:-56px 0}}
+@media (prefers-reduced-motion: reduce){.bar i{animation:none;background:var(--flow)}}
+.empty{color:var(--dim);font-size:13.5px;padding:14px 4px}
+
+/* ---------- editor ---------- */
+#editor{display:none}
+#editor.open{display:block}
+body.editing #home{display:none}
+.edHead{display:flex;align-items:center;gap:10px;padding:16px 0 6px;flex-wrap:wrap}
+.edHead input.title{font-family:var(--display);font-weight:600;font-size:17px;letter-spacing:.02em;background:none;border:1px solid transparent;flex:1;min-width:200px;padding:6px 8px}
+.edHead input.title:hover{border-color:var(--line)}
+.edMeta{font-family:var(--mono);font-size:12px;color:var(--dim);padding:0 0 8px 2px}
+.edTools{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px}
+audio{width:100%;height:38px;margin:2px 0 12px;filter:invert(.88) hue-rotate(160deg)}
+.seg{display:grid;grid-template-columns:70px 92px 1fr;gap:10px;padding:7px 6px;border-radius:8px;align-items:start}
+.seg:hover{background:var(--panel)}
+.seg .ts{font-family:var(--mono);font-size:11.5px;color:var(--dim);background:none;border:none;padding:4px 0;text-align:left}
+.seg .ts:hover{color:var(--flow)}
+.seg .spk{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.03em;border:1px solid var(--line);border-radius:20px;background:none;color:var(--dim);padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:92px}
+.seg .spk.set{color:var(--flow);border-color:var(--flow-deep)}
+.seg .spk:hover{border-color:var(--flow)}
+.seg .txt{min-height:1.4em;padding:2px 4px;border-radius:6px}
+.seg .txt:focus{background:var(--panel-2);outline:2px solid var(--flow-deep)}
+.hideSpk .seg{grid-template-columns:70px 1fr}
+.hideSpk .seg .spk{display:none}
+
+/* ---------- modals ---------- */
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:22px;max-width:520px;width:calc(100vw - 40px)}
+dialog::backdrop{background:rgba(6,10,14,.7)}
+dialog h3{font-family:var(--display);font-size:14px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;margin:0 0 14px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12.5px;font-weight:600;color:var(--dim);margin-bottom:5px}
+.field input,.field select,.field textarea{width:100%}
+.field .hint{font-size:12px;color:var(--dim);margin-top:5px}
+.row{display:flex;gap:8px;align-items:center}
+.row input{flex:1}
+.modalActs{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.btn{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-size:13.5px;font-weight:600}
+.btn:hover{border-color:var(--flow-deep)}
+.btn.primary{background:var(--flow);border-color:var(--flow);color:var(--ink);font-weight:700}
+.btn.primary:hover{background:#6ad1e4}
+.btn.danger{color:var(--err)}
+.keyok{color:var(--ok);font-size:12.5px}
+.keybad{color:var(--err);font-size:12.5px}
+.spkRow{display:flex;gap:8px;margin-bottom:8px}
+.spkRow input{flex:1}
+footer{color:var(--dim);font-size:12px;margin-top:44px;border-top:1px solid var(--line);padding-top:14px}
+#toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 16px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s}
+#toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="app">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#151D26" stroke="#2A3644"/><path d="M4 20c3-3 5 3 8 0s5 3 8 0 5 3 8 0" stroke="#4FC3D9" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M9 6v8M23 6v8" stroke="#8496A5" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <div>
+        <h1>Sluice</h1>
+        <small>Dump recordings. Let them chug. Your key, your files.</small>
+      </div>
+    </div>
+    <span class="usage" id="usage" title="Approximate audio transcribed today vs. the Groq free-tier reference limit"></span>
+    <button class="iconbtn" id="pauseBtn" title="Pause the queue after the current chunk">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+      <span id="pauseLbl">Pause</span>
+    </button>
+    <button class="iconbtn" id="settingsBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+      Settings
+    </button>
+  </header>
+
+  <div id="home">
+    <div id="drop" role="button" tabindex="0" aria-label="Add audio files">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m0 0 5 5m-5-5-5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <div class="big">Open the gate — drop audio files here</div>
+      <div class="sub">or click to browse · m4a, mp3, wav, webm, ogg, flac · batches welcome</div>
+      <input type="file" id="fileInput" accept="audio/*,.m4a,.mp3,.wav,.webm,.ogg,.opus,.flac,.aac" multiple hidden>
+    </div>
+
+    <div id="queueHead"><h2>Channel</h2><span class="count" id="count"></span></div>
+    <div id="queue"></div>
+
+    <footer>
+      Everything runs in this browser: audio and transcripts stay on this device, and files go only to Groq with your key.
+      Free-tier reference: about 8 h of audio per day. Keep this tab open while jobs run.
+    </footer>
+  </div>
+
+  <div id="editor"></div>
+</div>
+
+<dialog id="settingsDlg">
+  <h3>Settings</h3>
+  <div class="field">
+    <label for="apiKey">Groq API key</label>
+    <div class="row">
+      <input type="password" id="apiKey" placeholder="gsk_..." autocomplete="off" spellcheck="false">
+      <button class="btn" id="showKey" type="button" title="Show or hide key">👁</button>
+      <button class="btn" id="testKey" type="button">Test</button>
+    </div>
+    <div class="hint" id="keyMsg">Free at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> — create an account, open “API Keys,” create a key, paste it here. Stored only in this browser.</div>
+  </div>
+  <div class="field">
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="whisper-large-v3">whisper-large-v3 — most accurate (recommended)</option>
+      <option value="whisper-large-v3-turbo">whisper-large-v3-turbo — faster</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="chunkMin">Chunk length for long recordings</label>
+    <select id="chunkMin">
+      <option value="5">5 minutes</option>
+      <option value="8">8 minutes</option>
+      <option value="10" selected>10 minutes (default)</option>
+      <option value="12">12 minutes</option>
+    </select>
+    <div class="hint">Long files are re-encoded to mono 16 kHz and split with 8 s overlap so each upload stays under Groq's size limit, then stitched back together.</div>
+  </div>
+  <div class="field">
+    <label for="language">Language (optional)</label>
+    <input type="text" id="language" placeholder="auto-detect — or a code like en" maxlength="8">
+  </div>
+  <div class="field">
+    <label for="jargon">Jargon / vocabulary hint (optional)</label>
+    <textarea id="jargon" rows="2" placeholder="Project names, acronyms, technical terms — e.g. headworks, RFI, submittal, OC San, VFD"></textarea>
+    <div class="hint">Sent to Whisper as a prompt to improve spelling of specialty terms.</div>
+  </div>
+  <div class="modalActs">
+    <button class="btn primary" id="saveSettings" type="button">Save</button>
+  </div>
+</dialog>
+
+<dialog id="spkDlg">
+  <h3>Speakers</h3>
+  <div id="spkList"></div>
+  <button class="btn" id="addSpk" type="button">+ Add speaker</button>
+  <div class="hint" style="margin-top:10px;color:var(--dim);font-size:12px">
+    Click the chip next to any line in the transcript to cycle through these names. Renaming here updates every line.
+  </div>
+  <div class="modalActs">
+    <button class="btn primary" id="spkDone" type="button">Done</button>
+  </div>
+</dialog>
+
+<div id="toast" role="status"></div>
+<script>
+'use strict';
+/* Sluice — serverless batch transcription. Single file, vanilla JS, BYOK Groq. GPL-3.0 */
+
+const APP_NAME = 'Sluice';
+const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models';
+const SINGLE_REQ_MAX_SEC = 660;   // ~11 min of 16k mono WAV stays under ~20 MB
+const OVERLAP_SEC = 8;
+const FREE_TIER_HOURS = 8;
+
+/* ---------------- settings ---------------- */
+const defaults = { apiKey:'', model:'whisper-large-v3', chunkMin:10, language:'', jargon:'', showTs:true };
+let settings = Object.assign({}, defaults, JSON.parse(localStorage.getItem('sluice_settings') || '{}'));
+function saveSettings(){ localStorage.setItem('sluice_settings', JSON.stringify(settings)); }
+
+/* ---------------- tiny helpers ---------------- */
+const $ = (s, el) => (el || document).querySelector(s);
+function el(tag, cls, text){ const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+function fmtTime(s){ s = Math.max(0, Math.floor(s)); const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
+  return (h ? h + ':' + String(m).padStart(2,'0') : String(m)) + ':' + String(x).padStart(2,'0'); }
+function fmtBytes(b){ if (b == null) return ''; return b > 1048576 ? (b/1048576).toFixed(1) + ' MB' : Math.round(b/1024) + ' KB'; }
+function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600); }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+/* ---------------- usage tracker ---------------- */
+function usageToday(){ const u = JSON.parse(localStorage.getItem('sluice_usage') || '{}'); const d = new Date().toDateString();
+  return u.date === d ? (u.sec || 0) : 0; }
+function addUsage(sec){ const d = new Date().toDateString(); localStorage.setItem('sluice_usage', JSON.stringify({ date:d, sec: usageToday() + sec })); renderUsage(); }
+function renderUsage(){ const h = usageToday()/3600; $('#usage').innerHTML = 'Today <b>' + h.toFixed(1) + ' h</b> / ' + FREE_TIER_HOURS + ' h free'; }
+
+/* ---------------- IndexedDB ---------------- */
+let db;
+function idbOpen(){ return new Promise((res, rej) => {
+  const req = indexedDB.open('sluice', 1);
+  req.onupgradeneeded = () => { const d = req.result;
+    if (!d.objectStoreNames.contains('jobs')) d.createObjectStore('jobs', { keyPath:'id' });
+    if (!d.objectStoreNames.contains('audio')) d.createObjectStore('audio', { keyPath:'id' }); };
+  req.onsuccess = () => res(req.result);
+  req.onerror = () => rej(req.error);
+});}
+function idb(store, mode, fn){ return new Promise((res, rej) => {
+  const tx = db.transaction(store, mode); const st = tx.objectStore(store);
+  const out = fn(st);
+  tx.oncomplete = () => res(out && out.result !== undefined ? out.result : undefined);
+  tx.onerror = () => rej(tx.error);
+});}
+function jobPut(job){ return idb('jobs', 'readwrite', st => st.put(job)); }
+function jobDel(id){ return Promise.all([ idb('jobs','readwrite', st => st.delete(id)), idb('audio','readwrite', st => st.delete(id)) ]); }
+function audioPut(id, blob){ return idb('audio', 'readwrite', st => st.put({ id, blob })); }
+function audioGet(id){ return new Promise((res, rej) => {
+  const req = db.transaction('audio').objectStore('audio').get(id);
+  req.onsuccess = () => res(req.result ? req.result.blob : null);
+  req.onerror = () => rej(req.error);
+});}
+function jobsAll(){ return new Promise((res, rej) => {
+  const req = db.transaction('jobs').objectStore('jobs').getAll();
+  req.onsuccess = () => res(req.result || []);
+  req.onerror = () => rej(req.error);
+});}
+
+/* ---------------- state ---------------- */
+let jobs = [];            // sorted oldest first
+let running = false;
+let paused = false;
+let currentAbort = null;
+let openJobId = null;
+
+/* ---------------- audio pipeline ---------------- */
+async function decodeToMono16k(blob, onStage){
+  onStage('Decoding audio…');
+  const arr = await blob.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ac = new AC();
+  let decoded;
+  try { decoded = await ac.decodeAudioData(arr); }
+  catch (e) { throw new Error('Could not decode this file in the browser. Try m4a, mp3, wav, or webm.'); }
+  finally { ac.close().catch(() => {}); }
+  const dur = decoded.duration;
+  onStage('Optimizing to 16 kHz mono…');
+  const oc = new OfflineAudioContext(1, Math.ceil(dur * 16000), 16000);
+  const src = oc.createBufferSource(); src.buffer = decoded; src.connect(oc.destination); src.start();
+  const rendered = await oc.startRendering();
+  return { samples: rendered.getChannelData(0), duration: dur };
+}
+
+function encodeWav(samples, sr){
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++, o += 2){
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function planChunks(totalSec){
+  if (totalSec <= SINGLE_REQ_MAX_SEC) return [{ sliceStart: 0, base: 0, end: totalSec }];
+  const chunkSec = Math.max(60, (Number(settings.chunkMin) || 10) * 60);
+  const chunks = []; let base = 0;
+  while (base < totalSec - 0.5){
+    const end = Math.min(totalSec, base + chunkSec);
+    chunks.push({ sliceStart: Math.max(0, base - (chunks.length ? OVERLAP_SEC : 0)), base, end });
+    base = end;
+  }
+  return chunks;
+}
+
+async function groqTranscribe(blob, signal, onWait){
+  for (let attempt = 0; attempt < 9; attempt++){
+    const fd = new FormData();
+    fd.append('file', blob, 'chunk.wav');
+    fd.append('model', settings.model);
+    fd.append('response_format', 'verbose_json');
+    fd.append('temperature', '0');
+    if (settings.language) fd.append('language', settings.language.trim());
+    if (settings.jargon) fd.append('prompt', settings.jargon.slice(0, 800));
+    let res;
+    try {
+      res = await fetch(GROQ_URL, { method:'POST', headers:{ Authorization: 'Bearer ' + settings.apiKey }, body: fd, signal });
+    } catch (e) {
+      if (signal && signal.aborted) throw new Error('__aborted__');
+      await onWait(15, 'Network hiccup — retrying'); continue;
+    }
+    if (res.ok) return res.json();
+    if (res.status === 401) throw new Error('Invalid API key (401). Fix it in Settings, then Retry.');
+    if (res.status === 413) throw new Error('Upload too large (413). Choose a shorter chunk length in Settings, then Retry.');
+    if (res.status === 429 || res.status >= 500){
+      let wait = parseFloat(res.headers.get('retry-after')) || 0;
+      try { const j = await res.json(); const m = /try again in ([\d.]+)m?s/.exec((j.error && j.error.message) || ''); if (m) wait = Math.max(wait, parseFloat(m[1])); } catch (e) {}
+      wait = Math.min(Math.max(wait || 12, 6) + attempt * 5, 900);
+      await onWait(wait, res.status === 429 ? 'Rate limited — resuming' : 'Groq busy — retrying');
+      continue;
+    }
+    let msg = 'HTTP ' + res.status;
+    try { const j = await res.json(); if (j.error && j.error.message) msg = j.error.message; } catch (e) {}
+    throw new Error('Groq error: ' + msg);
+  }
+  throw new Error('Repeated rate limits — job stopped. Press Retry when the limit window resets.');
+}
+
+async function processJob(job){
+  job.status = 'processing'; job.error = null;
+  const setStage = msg => { job.progress = job.progress || {}; job.progress.msg = msg; renderQueue(); };
+  currentAbort = new AbortController();
+  const signal = currentAbort.signal;
+  try {
+    const blob = await audioGet(job.id);
+    if (!blob) throw new Error('Audio missing from local storage — re-add the file.');
+    const { samples, duration } = await decodeToMono16k(blob, setStage);
+    job.durationSec = duration; await jobPut(job);
+    const chunks = planChunks(duration);
+    const segments = []; let coveredUntil = 0;
+    for (let i = 0; i < chunks.length; i++){
+      if (signal.aborted) throw new Error('__aborted__');
+      while (paused && !signal.aborted){ setStage('Paused'); await sleep(600); }
+      if (signal.aborted) throw new Error('__aborted__');
+      const c = chunks[i];
+      setStage('Transcribing… chunk ' + (i + 1) + ' of ' + chunks.length);
+      job.progress.pct = Math.round((i / chunks.length) * 100); renderQueue();
+      const slice = samples.subarray(Math.floor(c.sliceStart * 16000), Math.floor(c.end * 16000));
+      const wav = encodeWav(slice, 16000);
+      const onWait = async (sec, why) => {
+        for (let s = Math.ceil(sec); s > 0 && !signal.aborted; s--){ setStage(why + ' in ' + s + ' s…'); await sleep(1000); }
+      };
+      const out = await groqTranscribe(wav, signal, onWait);
+      const segs = out.segments || (out.text ? [{ start: 0, end: c.end - c.sliceStart, text: out.text }] : []);
+      for (const s of segs){
+        const absStart = c.sliceStart + s.start, absEnd = c.sliceStart + s.end;
+        const mid = (absStart + absEnd) / 2;
+        const text = (s.text || '').trim();
+        if (!text) continue;
+        if (i > 0 && mid < coveredUntil - 0.25) continue;  // duplicate from overlap
+        segments.push({ start: absStart, end: absEnd, text, spk: -1 });
+        coveredUntil = Math.max(coveredUntil, absEnd);
+      }
+      job.progress.pct = Math.round(((i + 1) / chunks.length) * 100);
+    }
+    job.transcript = { speakers: [], segments };
+    job.status = 'done'; job.progress = { msg: 'Done', pct: 100 };
+    addUsage(duration);
+    await jobPut(job);
+    toast('“' + job.name + '” finished');
+  } catch (e) {
+    if (String(e.message) === '__aborted__'){ job.status = 'queued'; job.progress = { msg: 'Stopped — queue paused' }; }
+    else { job.status = 'error'; job.error = e.message; job.progress = { msg: e.message }; }
+    await jobPut(job);
+  } finally {
+    currentAbort = null;
+  }
+  renderQueue();
+}
+
+async function pump(){
+  if (running) return;
+  if (paused) { renderQueue(); return; }
+  const next = jobs.find(j => j.status === 'queued');
+  if (!next) { renderQueue(); return; }
+  if (!settings.apiKey){ openSettings('Add your free Groq API key to start the queue.'); return; }
+  running = true;
+  await processJob(next);
+  running = false;
+  pump();
+}
+
+/* ---------------- adding files ---------------- */
+async function addFiles(fileList){
+  const files = Array.from(fileList).filter(f => /audio|video/.test(f.type) || /\.(m4a|mp3|wav|webm|ogg|opus|flac|aac|mp4)$/i.test(f.name));
+  if (!files.length){ toast('No audio files found in that drop'); return; }
+  for (const f of files){
+    const job = { id: crypto.randomUUID(), name: f.name.replace(/\.[^.]+$/, ''), createdAt: Date.now(),
+      status: 'queued', progress: { msg: 'Waiting in channel' }, sizeBytes: f.size, durationSec: null, transcript: null, error: null };
+    await audioPut(job.id, f);
+    await jobPut(job);
+    jobs.push(job);
+  }
+  renderQueue();
+  toast(files.length + (files.length === 1 ? ' file added' : ' files added'));
+  if (!settings.apiKey) openSettings('Add your free Groq API key to start the queue.');
+  else pump();
+}
+
+/* ---------------- queue rendering ---------------- */
+const ICON = {
+  open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m0 0-6-6m6 6-6 6"/></svg>',
+  retry:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>',
+  stop:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+  trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>',
+  audio:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18m0 0 5-5m-5 5-5-5"/></svg>'
+};
+
+function renderQueue(){
+  const q = $('#queue');
+  if (!q) return;
+  q.innerHTML = '';
+  const sorted = jobs.slice().sort((a, b) => a.createdAt - b.createdAt);
+  $('#count').textContent = sorted.length ? sorted.filter(j => j.status !== 'done').length + ' waiting or running · ' + sorted.filter(j => j.status === 'done').length + ' done' : '';
+  if (!sorted.length){ q.appendChild(el('div', 'empty', 'Nothing in the channel yet. Drop your meeting recordings above and they will run one after another.')); return; }
+  for (const j of sorted){
+    const card = el('div', 'job ' + j.status);
+    card.appendChild(el('div', 'rail'));
+    const mid = el('div', 'mid');
+    const name = el('div', 'name', j.name);
+    if (j.status === 'done'){ name.title = 'Open transcript'; name.onclick = () => openEditor(j.id); }
+    mid.appendChild(name);
+    const meta = [];
+    if (j.durationSec) meta.push(fmtTime(j.durationSec));
+    if (j.sizeBytes) meta.push(fmtBytes(j.sizeBytes));
+    meta.push(new Date(j.createdAt).toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }));
+    mid.appendChild(el('div', 'meta', meta.join(' · ')));
+    mid.appendChild(el('div', 'status', (j.progress && j.progress.msg) || j.status));
+    const bar = el('div', 'bar'); const fill = el('i'); fill.style.width = ((j.progress && j.progress.pct) || 2) + '%'; bar.appendChild(fill); mid.appendChild(bar);
+    card.appendChild(mid);
+    const acts = el('div', 'acts');
+    const btn = (html, title, fn, cls) => { const b = el('button', cls || ''); b.innerHTML = html; b.title = title; b.onclick = fn; acts.appendChild(b); };
+    if (j.status === 'done') btn(ICON.open + 'Open', 'Open transcript', () => openEditor(j.id), 'primary');
+    if (j.status === 'error') btn(ICON.retry + 'Retry', 'Try again', async () => { j.status = 'queued'; j.progress = { msg:'Waiting in channel' }; await jobPut(j); renderQueue(); pump(); });
+    if (j.status === 'processing') btn(ICON.stop + 'Stop', 'Stop this job and pause the queue', () => { paused = true; updatePauseBtn(); if (currentAbort) currentAbort.abort(); });
+    btn(ICON.audio, 'Download original audio', async () => {
+      const b = await audioGet(j.id); if (!b) return toast('Audio not stored');
+      dl(b, j.name + guessExt(b)); });
+    if (j.status !== 'processing') btn(ICON.trash, 'Remove (deletes audio and transcript)', async () => {
+      if (!confirm('Remove “' + j.name + '” and its stored audio/transcript?')) return;
+      await jobDel(j.id); jobs = jobs.filter(x => x.id !== j.id); renderQueue(); });
+    card.appendChild(acts);
+    q.appendChild(card);
+  }
+}
+function guessExt(blob){ const t = blob.type || ''; if (t.includes('mp4') || t.includes('m4a') || t.includes('aac')) return '.m4a';
+  if (t.includes('mpeg')) return '.mp3'; if (t.includes('wav')) return '.wav'; if (t.includes('ogg')) return '.ogg'; if (t.includes('webm')) return '.webm'; return '.audio'; }
+function dl(blob, filename){ const u = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = u; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000); }
+
+/* ---------------- editor ---------------- */
+let saveTimer = null;
+function jobById(id){ return jobs.find(j => j.id === id); }
+
+async function openEditor(id){
+  const job = jobById(id); if (!job || !job.transcript) return;
+  openJobId = id;
+  document.body.classList.add('editing');
+  const ed = $('#editor'); ed.classList.add('open'); ed.innerHTML = '';
+
+  const head = el('div', 'edHead');
+  const back = el('button', 'iconbtn'); back.innerHTML = '&#8592; Channel'; back.onclick = closeEditor; head.appendChild(back);
+  const title = document.createElement('input'); title.className = 'title'; title.value = job.name; title.setAttribute('aria-label', 'Recording name');
+  title.onchange = () => { job.name = title.value.trim() || job.name; scheduleSave(job); };
+  head.appendChild(title);
+  ed.appendChild(head);
+
+  ed.appendChild(el('div', 'edMeta', fmtTime(job.durationSec || 0) + ' · ' + job.transcript.segments.length + ' segments · transcribed ' + new Date(job.createdAt).toLocaleDateString()));
+
+  const player = document.createElement('audio'); player.controls = true; player.preload = 'metadata';
+  audioGet(id).then(b => { if (b) player.src = URL.createObjectURL(b); });
+  ed.appendChild(player);
+
+  const tools = el('div', 'edTools');
+  const tbtn = (label, fn, cls) => { const b = el('button', 'iconbtn' + (cls ? ' ' + cls : ''), label); b.onclick = fn; tools.appendChild(b); return b; };
+  tbtn('Speakers', () => openSpeakers(job));
+  const tsBtn = tbtn(settings.showTs ? 'Timestamps: on' : 'Timestamps: off', () => {
+    settings.showTs = !settings.showTs; saveSettings(); tsBtn.textContent = settings.showTs ? 'Timestamps: on' : 'Timestamps: off'; });
+  tbtn('Copy text', async () => { flushEdits(job); await navigator.clipboard.writeText(buildExport(job)); toast('Transcript copied'); });
+  tbtn('Download .txt', () => { flushEdits(job); dl(new Blob([buildExport(job)], { type:'text/plain' }), job.name + '.txt'); }, '');
+  tbtn('Delete', async () => { if (!confirm('Delete this recording and transcript?')) return;
+    await jobDel(job.id); jobs = jobs.filter(x => x.id !== job.id); closeEditor(); renderQueue(); }, 'warn');
+  ed.appendChild(tools);
+
+  const list = el('div', 'segs');
+  job.transcript.segments.forEach((s, i) => {
+    const row = el('div', 'seg'); row.dataset.i = i;
+    const ts = el('button', 'ts', fmtTime(s.start)); ts.title = 'Jump audio here';
+    ts.onclick = () => { if (player.src){ player.currentTime = s.start; player.play().catch(() => {}); } };
+    row.appendChild(ts);
+    const spk = el('button', 'spk'); setSpkChip(spk, job, s);
+    spk.onclick = () => { const n = job.transcript.speakers.length;
+      s.spk = s.spk >= n - 1 ? -1 : s.spk + 1;
+      if (n === 0) { openSpeakers(job); return; }
+      setSpkChip(spk, job, s); scheduleSave(job); };
+    row.appendChild(spk);
+    const txt = el('div', 'txt', s.text); try { txt.contentEditable = 'plaintext-only'; } catch (e) { txt.contentEditable = 'true'; }
+    txt.addEventListener('input', () => scheduleSave(job));
+    row.appendChild(txt);
+    list.appendChild(row);
+  });
+  ed.appendChild(list);
+  window.scrollTo(0, 0);
+}
+function setSpkChip(chip, job, s){
+  const name = s.spk >= 0 ? (job.transcript.speakers[s.spk] || 'S' + (s.spk + 1)) : '—';
+  chip.textContent = name; chip.classList.toggle('set', s.spk >= 0);
+  chip.title = 'Click to cycle speaker';
+}
+function flushEdits(job){
+  document.querySelectorAll('#editor .seg').forEach(row => {
+    const i = Number(row.dataset.i); const t = $('.txt', row);
+    if (job.transcript.segments[i] && t) job.transcript.segments[i].text = t.textContent.trim();
+  });
+}
+function scheduleSave(job){ clearTimeout(saveTimer); saveTimer = setTimeout(async () => { flushEdits(job); await jobPut(job); }, 600); }
+function closeEditor(){
+  const job = jobById(openJobId);
+  if (job){ flushEdits(job); jobPut(job); }
+  openJobId = null;
+  document.body.classList.remove('editing');
+  $('#editor').classList.remove('open');
+  $('#editor').innerHTML = '';
+  renderQueue();
+}
+
+function buildExport(job){
+  const t = job.transcript; const out = [];
+  let g = null;
+  const push = () => { if (!g) return;
+    let head = '';
+    if (settings.showTs) head += '[' + fmtTime(g.start) + '] ';
+    if (g.spk >= 0) head += (t.speakers[g.spk] || 'Speaker ' + (g.spk + 1)) + ':';
+    out.push((head ? head + '\n' : '') + g.text.join(' ')); g = null; };
+  for (const s of t.segments){
+    if (!s.text) continue;
+    const brk = !g || s.spk !== g.spk || s.start - g.end > 3 || g.text.join(' ').length > 700;
+    if (brk){ push(); g = { spk: s.spk, start: s.start, end: s.end, text: [] }; }
+    g.text.push(s.text); g.end = s.end;
+  }
+  push();
+  return job.name + '\n' + '='.repeat(Math.min(60, job.name.length)) + '\n\n' + out.join('\n\n') + '\n';
+}
+
+/* ---------------- speakers dialog ---------------- */
+function openSpeakers(job){
+  const dlg = $('#spkDlg'); const list = $('#spkList');
+  const draw = () => {
+    list.innerHTML = '';
+    job.transcript.speakers.forEach((name, i) => {
+      const row = el('div', 'spkRow');
+      const inp = document.createElement('input'); inp.value = name; inp.placeholder = 'Speaker ' + (i + 1);
+      inp.onchange = () => { job.transcript.speakers[i] = inp.value.trim() || 'Speaker ' + (i + 1); scheduleSave(job); };
+      row.appendChild(inp);
+      const del = el('button', 'btn danger', 'Remove');
+      del.onclick = () => { job.transcript.speakers.splice(i, 1);
+        job.transcript.segments.forEach(s => { if (s.spk === i) s.spk = -1; else if (s.spk > i) s.spk--; });
+        scheduleSave(job); draw(); };
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+    if (!job.transcript.speakers.length) list.appendChild(el('div', 'hint', 'No speakers yet — add the people in this meeting.'));
+  };
+  draw();
+  $('#addSpk').onclick = () => { job.transcript.speakers.push('Speaker ' + (job.transcript.speakers.length + 1)); scheduleSave(job); draw(); };
+  $('#spkDone').onclick = () => { dlg.close(); if (openJobId) openEditor(openJobId); };
+  dlg.showModal();
+}
+
+/* ---------------- settings dialog ---------------- */
+function openSettings(notice){
+  $('#apiKey').value = settings.apiKey;
+  $('#model').value = settings.model;
+  $('#chunkMin').value = String(settings.chunkMin);
+  $('#language').value = settings.language;
+  $('#jargon').value = settings.jargon;
+  if (notice){ const m = $('#keyMsg'); m.innerHTML = '<span class="keybad">' + notice + '</span> Free at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>.'; }
+  $('#settingsDlg').showModal();
+}
+function wireSettings(){
+  $('#settingsBtn').onclick = () => openSettings();
+  $('#showKey').onclick = () => { const k = $('#apiKey'); k.type = k.type === 'password' ? 'text' : 'password'; };
+  $('#testKey').onclick = async () => {
+    const m = $('#keyMsg'); m.textContent = 'Checking…';
+    try { const r = await fetch(GROQ_MODELS_URL, { headers: { Authorization: 'Bearer ' + $('#apiKey').value.trim() } });
+      m.innerHTML = r.ok ? '<span class="keyok">Key works ✓</span>' : '<span class="keybad">Groq rejected that key (' + r.status + ')</span>';
+    } catch (e) { m.innerHTML = '<span class="keybad">Could not reach Groq — check your network</span>'; }
+  };
+  $('#saveSettings').onclick = () => {
+    settings.apiKey = $('#apiKey').value.trim();
+    settings.model = $('#model').value;
+    settings.chunkMin = Number($('#chunkMin').value) || 10;
+    settings.language = $('#language').value.trim();
+    settings.jargon = $('#jargon').value.trim();
+    saveSettings(); $('#settingsDlg').close(); toast('Settings saved'); pump();
+  };
+}
+
+/* ---------------- pause ---------------- */
+function updatePauseBtn(){ $('#pauseLbl').textContent = paused ? 'Resume' : 'Pause';
+  $('#pauseBtn').classList.toggle('warn', paused); }
+function wirePause(){ $('#pauseBtn').onclick = () => { paused = !paused; updatePauseBtn();
+  if (!paused) pump(); else toast('Queue will pause after the current chunk'); }; }
+
+/* ---------------- drop zone ---------------- */
+function wireDrop(){
+  const dz = $('#drop'), fi = $('#fileInput');
+  dz.onclick = () => fi.click();
+  dz.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fi.click(); } };
+  fi.onchange = () => { addFiles(fi.files); fi.value = ''; };
+  ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+  window.addEventListener('dragover', e => e.preventDefault());
+  window.addEventListener('drop', e => e.preventDefault());
+}
+
+/* ---------------- boot ---------------- */
+window.addEventListener('beforeunload', e => {
+  if (jobs.some(j => j.status === 'processing' || j.status === 'queued')){ e.preventDefault(); e.returnValue = ''; }
+});
+
+(async function boot(){
+  try { db = await idbOpen(); } catch (e) { alert('This browser blocked local storage (IndexedDB). Sluice needs it to queue files.'); return; }
+  jobs = await jobsAll();
+  for (const j of jobs){ if (j.status === 'processing'){ j.status = 'queued'; j.progress = { msg: 'Interrupted — will re-run' }; await jobPut(j); } }
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  renderUsage(); renderQueue(); wireDrop(); wireSettings(); wirePause(); updatePauseBtn();
+  pump();
+})();
+</script>
+</body>
+</html>
