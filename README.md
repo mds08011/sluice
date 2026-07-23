@@ -6,6 +6,8 @@ Drop a folder's worth of recordings into the channel, walk away, and come back t
 
 **Live app:** [mds08011.github.io/sluice](https://mds08011.github.io/sluice/)
 
+![The Sluice queue: two finished transcripts, one recording mid-way through chunked transcription, and two more waiting their turn](docs/screenshot.png)
+
 ## Core Features
 
 - Single `.html` file with vanilla JavaScript and inline CSS — no frameworks, no build step, no dependencies to install, no backend to run
