@@ -40,7 +40,15 @@ Open **Settings**, paste your key, and press **Test** to confirm Groq accepts it
 
 Drag audio files onto the channel — or click to browse. Accepted formats are whatever your browser can decode, which in practice means `m4a`, `mp3`, `wav`, `webm`, `ogg`, `opus`, `flac`, `aac`, and the audio track of `mp4`.
 
-Jobs run one after another. **Keep the tab open while the queue runs** — this is a browser app, so a closed tab means a paused queue. You can **Pause** between chunks, **Stop** a running job, and **Retry** anything that errored. When a job finishes, click its name to open the transcript.
+Jobs run one after another. **Keep the tab open while the queue runs** — this is a browser app, so a closed tab means a paused queue. You can **Pause** between chunks, **Stop** a running job, and **Retry** anything that errored.
+
+### 4. Edit and export
+
+When a job finishes, click its name to open the transcript.
+
+![The transcript editor: timestamped segments with editable text, speaker chips, and an audio player](docs/editor.png)
+
+Every line is editable in place. Click a timestamp to jump the audio there, and click the chip beside a line to cycle through your speakers — add and rename them under **Speakers**, and a rename updates every line at once. **Copy text** and **Download .txt** both respect the timestamp toggle and group consecutive lines by speaker.
 
 ### Related Settings
 
