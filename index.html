@@ -257,13 +257,14 @@ footer{color:var(--dim);font-size:12px;margin-top:44px;border-top:1px solid var(
 const APP_NAME = 'Sluice';
 const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models';
-const SINGLE_REQ_MAX_SEC = 660;   // ~11 min of 16k mono WAV stays under ~20 MB
+const MAX_CHUNK_SEC = 720;        // 12 min of 16 kHz mono 16-bit WAV ≈ 23 MB — under Groq's 25 MB cap
 const OVERLAP_SEC = 8;
 const FREE_TIER_HOURS = 8;
 
 /* ---------------- settings ---------------- */
 const defaults = { apiKey:'', model:'whisper-large-v3', chunkMin:10, language:'', jargon:'', showTs:true };
-let settings = Object.assign({}, defaults, JSON.parse(localStorage.getItem('sluice_settings') || '{}'));
+function readJSON(key){ try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (e) { return {}; } }
+let settings = Object.assign({}, defaults, readJSON('sluice_settings'));
 function saveSettings(){ localStorage.setItem('sluice_settings', JSON.stringify(settings)); }
 
 /* ---------------- tiny helpers ---------------- */
@@ -274,9 +275,11 @@ function fmtTime(s){ s = Math.max(0, Math.floor(s)); const h = Math.floor(s/3600
 function fmtBytes(b){ if (b == null) return ''; return b > 1048576 ? (b/1048576).toFixed(1) + ' MB' : Math.round(b/1024) + ' KB'; }
 function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600); }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+function uid(){ return (crypto.randomUUID ? crypto.randomUUID()
+  : 'j-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)); }
 
 /* ---------------- usage tracker ---------------- */
-function usageToday(){ const u = JSON.parse(localStorage.getItem('sluice_usage') || '{}'); const d = new Date().toDateString();
+function usageToday(){ const u = readJSON('sluice_usage'); const d = new Date().toDateString();
   return u.date === d ? (u.sec || 0) : 0; }
 function addUsage(sec){ const d = new Date().toDateString(); localStorage.setItem('sluice_usage', JSON.stringify({ date:d, sec: usageToday() + sec })); renderUsage(); }
 function renderUsage(){ const h = usageToday()/3600; $('#usage').innerHTML = 'Today <b>' + h.toFixed(1) + ' h</b> / ' + FREE_TIER_HOURS + ' h free'; }
@@ -329,6 +332,7 @@ async function decodeToMono16k(blob, onStage){
   catch (e) { throw new Error('Could not decode this file in the browser. Try m4a, mp3, wav, or webm.'); }
   finally { ac.close().catch(() => {}); }
   const dur = decoded.duration;
+  if (!(dur > 0)) throw new Error('This file decoded to zero seconds of audio — it may be empty or corrupt.');
   onStage('Optimizing to 16 kHz mono…');
   const oc = new OfflineAudioContext(1, Math.ceil(dur * 16000), 16000);
   const src = oc.createBufferSource(); src.buffer = decoded; src.connect(oc.destination); src.start();
@@ -353,8 +357,8 @@ function encodeWav(samples, sr){
 }
 
 function planChunks(totalSec){
-  if (totalSec <= SINGLE_REQ_MAX_SEC) return [{ sliceStart: 0, base: 0, end: totalSec }];
-  const chunkSec = Math.max(60, (Number(settings.chunkMin) || 10) * 60);
+  const chunkSec = Math.min(MAX_CHUNK_SEC, Math.max(60, (Number(settings.chunkMin) || 10) * 60));
+  if (totalSec <= chunkSec) return [{ sliceStart: 0, base: 0, end: totalSec }];
   const chunks = []; let base = 0;
   while (base < totalSec - 0.5){
     const end = Math.min(totalSec, base + chunkSec);
@@ -385,7 +389,11 @@ async function groqTranscribe(blob, signal, onWait){
     if (res.status === 413) throw new Error('Upload too large (413). Choose a shorter chunk length in Settings, then Retry.');
     if (res.status === 429 || res.status >= 500){
       let wait = parseFloat(res.headers.get('retry-after')) || 0;
-      try { const j = await res.json(); const m = /try again in ([\d.]+)m?s/.exec((j.error && j.error.message) || ''); if (m) wait = Math.max(wait, parseFloat(m[1])); } catch (e) {}
+      // Groq reports e.g. "try again in 7.66s" or "try again in 2m59.56s" — both forms must parse.
+      try { const j = await res.json();
+        const m = /try again in (?:(\d+)m)?([\d.]+)s/.exec((j.error && j.error.message) || '');
+        if (m) wait = Math.max(wait, (parseInt(m[1] || '0', 10) * 60) + parseFloat(m[2]));
+      } catch (e) {}
       wait = Math.min(Math.max(wait || 12, 6) + attempt * 5, 900);
       await onWait(wait, res.status === 429 ? 'Rate limited — resuming' : 'Groq busy — retrying');
       continue;
@@ -456,8 +464,9 @@ async function pump(){
   if (!next) { renderQueue(); return; }
   if (!settings.apiKey){ openSettings('Add your free Groq API key to start the queue.'); return; }
   running = true;
-  await processJob(next);
-  running = false;
+  try { await processJob(next); }
+  catch (e){ next.status = 'error'; next.error = String(e && e.message || e); next.progress = { msg: next.error }; renderQueue(); }
+  finally { running = false; }
   pump();
 }
 
@@ -466,7 +475,7 @@ async function addFiles(fileList){
   const files = Array.from(fileList).filter(f => /audio|video/.test(f.type) || /\.(m4a|mp3|wav|webm|ogg|opus|flac|aac|mp4)$/i.test(f.name));
   if (!files.length){ toast('No audio files found in that drop'); return; }
   for (const f of files){
-    const job = { id: crypto.randomUUID(), name: f.name.replace(/\.[^.]+$/, ''), createdAt: Date.now(),
+    const job = { id: uid(), name: f.name.replace(/\.[^.]+$/, ''), createdAt: Date.now(),
       status: 'queued', progress: { msg: 'Waiting in channel' }, sizeBytes: f.size, durationSec: null, transcript: null, error: null };
     await audioPut(job.id, f);
     await jobPut(job);
@@ -530,10 +539,13 @@ function dl(blob, filename){ const u = URL.createObjectURL(blob); const a = docu
 
 /* ---------------- editor ---------------- */
 let saveTimer = null;
+let editorUrl = null;   // object URL for the player; revoked when the editor is rebuilt or closed
 function jobById(id){ return jobs.find(j => j.id === id); }
+function dropEditorUrl(){ if (editorUrl){ URL.revokeObjectURL(editorUrl); editorUrl = null; } }
 
 async function openEditor(id){
   const job = jobById(id); if (!job || !job.transcript) return;
+  dropEditorUrl();
   openJobId = id;
   document.body.classList.add('editing');
   const ed = $('#editor'); ed.classList.add('open'); ed.innerHTML = '';
@@ -548,7 +560,7 @@ async function openEditor(id){
   ed.appendChild(el('div', 'edMeta', fmtTime(job.durationSec || 0) + ' · ' + job.transcript.segments.length + ' segments · transcribed ' + new Date(job.createdAt).toLocaleDateString()));
 
   const player = document.createElement('audio'); player.controls = true; player.preload = 'metadata';
-  audioGet(id).then(b => { if (b) player.src = URL.createObjectURL(b); });
+  audioGet(id).then(b => { if (b && openJobId === id){ editorUrl = URL.createObjectURL(b); player.src = editorUrl; } });
   ed.appendChild(player);
 
   const tools = el('div', 'edTools');
@@ -596,7 +608,8 @@ function flushEdits(job){
 function scheduleSave(job){ clearTimeout(saveTimer); saveTimer = setTimeout(async () => { flushEdits(job); await jobPut(job); }, 600); }
 function closeEditor(){
   const job = jobById(openJobId);
-  if (job){ flushEdits(job); jobPut(job); }
+  if (job){ clearTimeout(saveTimer); flushEdits(job); jobPut(job); }
+  dropEditorUrl();
   openJobId = null;
   document.body.classList.remove('editing');
   $('#editor').classList.remove('open');
@@ -611,6 +624,7 @@ function buildExport(job){
     let head = '';
     if (settings.showTs) head += '[' + fmtTime(g.start) + '] ';
     if (g.spk >= 0) head += (t.speakers[g.spk] || 'Speaker ' + (g.spk + 1)) + ':';
+    head = head.replace(/\s+$/, '');
     out.push((head ? head + '\n' : '') + g.text.join(' ')); g = null; };
   for (const s of t.segments){
     if (!s.text) continue;
@@ -624,6 +638,8 @@ function buildExport(job){
 
 /* ---------------- speakers dialog ---------------- */
 function openSpeakers(job){
+  // Done rebuilds the editor from job.transcript, so capture in-progress text edits first.
+  if (openJobId === job.id){ clearTimeout(saveTimer); flushEdits(job); }
   const dlg = $('#spkDlg'); const list = $('#spkList');
   const draw = () => {
     list.innerHTML = '';
@@ -648,16 +664,20 @@ function openSpeakers(job){
 }
 
 /* ---------------- settings dialog ---------------- */
+let keyMsgDefault = '';
 function openSettings(notice){
   $('#apiKey').value = settings.apiKey;
   $('#model').value = settings.model;
   $('#chunkMin').value = String(settings.chunkMin);
   $('#language').value = settings.language;
   $('#jargon').value = settings.jargon;
-  if (notice){ const m = $('#keyMsg'); m.innerHTML = '<span class="keybad">' + notice + '</span> Free at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>.'; }
+  const m = $('#keyMsg');
+  m.innerHTML = keyMsgDefault;                       // clear any previous notice or Test result
+  if (notice) m.prepend(el('span', 'keybad', notice), ' ');
   $('#settingsDlg').showModal();
 }
 function wireSettings(){
+  keyMsgDefault = $('#keyMsg').innerHTML;
   $('#settingsBtn').onclick = () => openSettings();
   $('#showKey').onclick = () => { const k = $('#apiKey'); k.type = k.type === 'password' ? 'text' : 'password'; };
   $('#testKey').onclick = async () => {
@@ -701,7 +721,7 @@ window.addEventListener('beforeunload', e => {
 });
 
 (async function boot(){
-  try { db = await idbOpen(); } catch (e) { alert('This browser blocked local storage (IndexedDB). Sluice needs it to queue files.'); return; }
+  try { db = await idbOpen(); } catch (e) { alert('This browser blocked local storage (IndexedDB). ' + APP_NAME + ' needs it to queue files.'); return; }
   jobs = await jobsAll();
   for (const j of jobs){ if (j.status === 'processing'){ j.status = 'queued'; j.progress = { msg: 'Interrupted — will re-run' }; await jobPut(j); } }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
