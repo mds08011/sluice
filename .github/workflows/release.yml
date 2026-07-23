@@ -1,0 +1,26 @@
+name: Release
+
+# Tagging vN.N drafts a release with index.html attached as a downloadable asset.
+#   git tag v1.0 && git push origin v1.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v5
+
+      - name: Draft the release and attach index.html
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Sluice ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: index.html
